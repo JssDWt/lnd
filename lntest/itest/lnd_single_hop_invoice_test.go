@@ -243,6 +243,94 @@ func testSingleHopInvoice(net *lntest.NetworkHarness, t *harnessTest) {
 			hopHint.CltvExpiryDelta)
 	}
 
+	// ***********************************
+	// ADDED CAROL FOR LN SEMINAR EXERCISE
+	// ***********************************
+	var carolArgs []string
+	carol, err := net.NewNode("Carol", carolArgs)
+	if err != nil {
+		t.Fatalf("unable to create new node: %v", err)
+	}
+	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
+	if err := net.ConnectNodes(ctxt, net.Bob, carol); err != nil {
+		t.Fatalf("unable to connect bob to carol: %v", err)
+	}
+
+	// We'll then create a channel from Bob to Carol. After this channel is
+	// open, our topology looks like:  A -> B -> C.
+	ctxt, _ = context.WithTimeout(ctxb, channelOpenTimeout)
+	bobChanPoint := openChannelAndAssert(
+		ctxt, t, net, net.Bob, carol,
+		lntest.OpenChannelParams{
+			Amt: chanAmt,
+		},
+	)
+	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
+	err = net.Bob.WaitForNetworkChannelOpen(ctxt, bobChanPoint)
+	if err != nil {
+		t.Fatalf("bob didn't report channel: %v", err)
+	}
+	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
+	err = carol.WaitForNetworkChannelOpen(ctxt, bobChanPoint)
+	if err != nil {
+		t.Fatalf("carol didn't report channel: %v", err)
+	}
+	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
+	err = net.Alice.WaitForNetworkChannelOpen(ctxt, bobChanPoint)
+	if err != nil {
+		t.Fatalf("alice didn't report channel: %v", err)
+	}
+
+	// Now that the channel is open, create an invoice for Carol which
+	// expects a payment of 1000 satoshis from Alice paid via a particular
+	// preimage.
+	const carolPaymentAmt = 1000
+	carolPreimage := bytes.Repeat([]byte("C"), 32)
+	carolInvoice := &lnrpc.Invoice{
+		Memo:      "testing Alice - Carol",
+		RPreimage: carolPreimage,
+		Value:     carolPaymentAmt,
+	}
+	carolInvoiceResp, err := carol.AddInvoice(ctxb, carolInvoice)
+	if err != nil {
+		t.Fatalf("unable to add invoice: %v", err)
+	}
+
+	// With the invoice for Carol added, send a payment from Alice paying
+	// to the above generated invoice.
+	ctxt, _ = context.WithTimeout(ctxb, defaultTimeout)
+	carolResp := sendAndAssertSuccess(
+		ctxt, t, net.Alice,
+		&routerrpc.SendPaymentRequest{
+			PaymentRequest: carolInvoiceResp.PaymentRequest,
+			TimeoutSeconds: 60,
+			FeeLimitMsat:   noFeeLimitMsat,
+		},
+	)
+	if hex.EncodeToString(carolPreimage) != carolResp.PaymentPreimage {
+		t.Fatalf("preimage mismatch: expected %v, got %v", carolPreimage,
+			carolResp.PaymentPreimage)
+	}
+
+	// Carol's invoice should now be found and marked as settled.
+	carolPayHash := &lnrpc.PaymentHash{
+		RHash: carolInvoiceResp.RHash,
+	}
+	ctxt, _ = context.WithTimeout(ctxt, defaultTimeout)
+	carolDbInvoice, err := carol.LookupInvoice(ctxt, carolPayHash)
+	if err != nil {
+		t.Fatalf("unable to lookup invoice: %v", err)
+	}
+	if !carolDbInvoice.Settled { // nolint:staticcheck
+		t.Fatalf("Carol's invoice should be marked as settled: %v",
+			spew.Sdump(carolDbInvoice))
+	}
+
+	// ***************************************
+	// END ADDED CAROL FOR LN SEMINAR EXERCISE
+	// ***************************************
+
 	ctxt, _ = context.WithTimeout(ctxb, channelCloseTimeout)
 	closeChannelAndAssert(ctxt, t, net, net.Alice, chanPoint, false)
+	closeChannelAndAssert(ctxt, t, net, net.Bob, bobChanPoint, false)
 }
